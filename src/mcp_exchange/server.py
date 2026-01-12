@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from .auth import GraphAuthenticator
 from .client import ExchangeClient, GraphError, GraphNotFoundError
 from .config import load_config
+from .timezone import TimezoneService
 
 # Configure logging to stderr (stdout is reserved for MCP protocol)
 logging.basicConfig(
@@ -29,12 +30,18 @@ logger = logging.getLogger(__name__)
 async def lifespan(_server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Manage server lifecycle and shared resources."""
     config = load_config()
-    logger.info("Exchange Online MCP Server starting")
+    logger.info("Exchange Online MCP Server starting (timezone: %s)", config.timezone)
 
     authenticator = GraphAuthenticator(config)
+    tz_service = TimezoneService(config.timezone)
 
     async with ExchangeClient(config, authenticator) as client:
-        yield {"client": client, "config": config, "authenticator": authenticator}
+        yield {
+            "client": client,
+            "config": config,
+            "authenticator": authenticator,
+            "tz": tz_service,
+        }
 
     logger.info("Exchange Online MCP Server shutting down")
 
@@ -61,7 +68,11 @@ def format_folder(folder: Any) -> dict[str, Any]:
     }
 
 
-def format_message(message: Any, include_body: bool = False) -> dict[str, Any]:
+def format_message(
+    message: Any,
+    tz: TimezoneService | None = None,
+    include_body: bool = False,
+) -> dict[str, Any]:
     """Format an email message for display."""
     result: dict[str, Any] = {
         "id": message.id,
@@ -75,7 +86,10 @@ def format_message(message: Any, include_body: bool = False) -> dict[str, Any]:
         }
 
     if message.received_date_time:
-        result["receivedDateTime"] = message.received_date_time.isoformat()
+        if tz:
+            result["receivedDateTime"] = tz.format_datetime(message.received_date_time, "UTC")
+        else:
+            result["receivedDateTime"] = message.received_date_time.isoformat()
 
     result["isRead"] = message.is_read
     result["hasAttachments"] = message.has_attachments
@@ -119,7 +133,7 @@ def format_calendar(calendar: Any) -> dict[str, Any]:
     return result
 
 
-def format_event(event: Any) -> dict[str, Any]:
+def format_event(event: Any, tz: TimezoneService | None = None) -> dict[str, Any]:
     """Format a calendar event for display."""
     result: dict[str, Any] = {
         "id": event.id,
@@ -127,16 +141,22 @@ def format_event(event: Any) -> dict[str, Any]:
     }
 
     if event.start:
-        result["start"] = {
-            "dateTime": event.start.date_time,
-            "timeZone": event.start.time_zone,
-        }
+        if tz:
+            result["start"] = tz.format_graph_datetime(event.start)
+        else:
+            result["start"] = {
+                "dateTime": event.start.date_time,
+                "timeZone": event.start.time_zone,
+            }
 
     if event.end:
-        result["end"] = {
-            "dateTime": event.end.date_time,
-            "timeZone": event.end.time_zone,
-        }
+        if tz:
+            result["end"] = tz.format_graph_datetime(event.end)
+        else:
+            result["end"] = {
+                "dateTime": event.end.date_time,
+                "timeZone": event.end.time_zone,
+            }
 
     if event.location and event.location.display_name:
         result["location"] = event.location.display_name
@@ -179,7 +199,7 @@ def format_event(event: Any) -> dict[str, Any]:
     return result
 
 
-def format_schedule(schedule: Any) -> dict[str, Any]:
+def format_schedule(schedule: Any, tz: TimezoneService | None = None) -> dict[str, Any]:
     """Format schedule information for display."""
     result: dict[str, Any] = {
         "email": schedule.schedule_id,
@@ -193,8 +213,8 @@ def format_schedule(schedule: Any) -> dict[str, Any]:
         result["scheduleItems"] = [
             {
                 "status": item.status,
-                "start": item.start.date_time,
-                "end": item.end.date_time,
+                "start": tz.format_graph_datetime(item.start) if tz else item.start.date_time,
+                "end": tz.format_graph_datetime(item.end) if tz else item.end.date_time,
                 "subject": item.subject if not item.is_private else "[Private]",
                 "location": item.location if not item.is_private else None,
             }
@@ -270,22 +290,23 @@ async def search_emails(
     """
     ctx = mcp.get_context()
     client: ExchangeClient = ctx.request_context.lifespan_context["client"]
+    tz: TimezoneService = ctx.request_context.lifespan_context["tz"]
 
     limit = min(max(1, limit), 100)
 
-    # Parse dates
+    # Parse dates using timezone service
     parsed_from_date = None
     parsed_to_date = None
 
     if from_date:
         try:
-            parsed_from_date = datetime.fromisoformat(from_date)
+            parsed_from_date = tz.parse_date(from_date)
         except ValueError:
             return json.dumps({"error": f"Invalid from_date format: {from_date}. Use YYYY-MM-DD."})
 
     if to_date:
         try:
-            parsed_to_date = datetime.fromisoformat(to_date)
+            parsed_to_date = tz.parse_date(to_date)
         except ValueError:
             return json.dumps({"error": f"Invalid to_date format: {to_date}. Use YYYY-MM-DD."})
 
@@ -333,7 +354,7 @@ async def search_emails(
         result = {
             "count": len(messages),
             "filters": ", ".join(filters_applied) if filters_applied else "none",
-            "messages": [format_message(m) for m in messages],
+            "messages": [format_message(m, tz) for m in messages],
         }
 
         return json.dumps(result, indent=2, default=str)
@@ -354,10 +375,11 @@ async def get_email(message_id: str) -> str:
     """
     ctx = mcp.get_context()
     client: ExchangeClient = ctx.request_context.lifespan_context["client"]
+    tz: TimezoneService = ctx.request_context.lifespan_context["tz"]
 
     try:
         message = await client.get_message(message_id)
-        return json.dumps(format_message(message, include_body=True), indent=2, default=str)
+        return json.dumps(format_message(message, tz, include_body=True), indent=2, default=str)
 
     except GraphNotFoundError:
         return json.dumps({"error": f"Message '{message_id}' not found"})
@@ -455,6 +477,7 @@ async def create_draft(
     """
     ctx = mcp.get_context()
     client: ExchangeClient = ctx.request_context.lifespan_context["client"]
+    tz: TimezoneService = ctx.request_context.lifespan_context["tz"]
 
     # Parse recipient lists
     to_list = [e.strip() for e in to_recipients.split(",")] if to_recipients else None
@@ -470,7 +493,7 @@ async def create_draft(
             importance=importance,
         )
 
-        result = format_message(message)
+        result = format_message(message, tz)
         result["_created"] = True
         result["message"] = f"Draft created: '{subject}'"
 
@@ -533,22 +556,23 @@ async def list_events(
     """
     ctx = mcp.get_context()
     client: ExchangeClient = ctx.request_context.lifespan_context["client"]
+    tz: TimezoneService = ctx.request_context.lifespan_context["tz"]
 
     limit = min(max(1, limit), 100)
 
-    # Parse dates
+    # Parse dates using timezone service
     parsed_start = None
     parsed_end = None
 
     if start_date:
         try:
-            parsed_start = datetime.fromisoformat(start_date)
+            parsed_start = tz.parse_date(start_date)
         except ValueError:
             return json.dumps({"error": f"Invalid start_date format: {start_date}. Use YYYY-MM-DD."})
 
     if end_date:
         try:
-            parsed_end = datetime.fromisoformat(end_date)
+            parsed_end = tz.parse_date(end_date)
         except ValueError:
             return json.dumps({"error": f"Invalid end_date format: {end_date}. Use YYYY-MM-DD."})
 
@@ -563,7 +587,7 @@ async def list_events(
         result = {
             "count": len(events),
             "calendar": calendar_id or "primary",
-            "events": [format_event(e) for e in events],
+            "events": [format_event(e, tz) for e in events],
         }
 
         return json.dumps(result, indent=2, default=str)
@@ -584,10 +608,11 @@ async def get_event(event_id: str) -> str:
     """
     ctx = mcp.get_context()
     client: ExchangeClient = ctx.request_context.lifespan_context["client"]
+    tz: TimezoneService = ctx.request_context.lifespan_context["tz"]
 
     try:
         event = await client.get_event(event_id)
-        return json.dumps(format_event(event), indent=2, default=str)
+        return json.dumps(format_event(event, tz), indent=2, default=str)
 
     except GraphNotFoundError:
         return json.dumps({"error": f"Event '{event_id}' not found"})
@@ -600,7 +625,7 @@ async def get_free_busy(
     emails: str,
     start_time: str,
     end_time: str,
-    timezone: str = "UTC",
+    timezone: str | None = None,
     interval_minutes: int = 30,
 ) -> str:
     """Get free/busy schedule for one or more users.
@@ -611,7 +636,7 @@ async def get_free_busy(
         emails: Comma-separated list of email addresses to check (max 20).
         start_time: Start of time range (ISO format: YYYY-MM-DDTHH:MM:SS).
         end_time: End of time range (ISO format: YYYY-MM-DDTHH:MM:SS).
-        timezone: Timezone for the query (default: UTC).
+        timezone: Timezone for the query (default: configured timezone).
         interval_minutes: Granularity of availability view in minutes (default: 30).
 
     Returns:
@@ -626,6 +651,10 @@ async def get_free_busy(
     """
     ctx = mcp.get_context()
     client: ExchangeClient = ctx.request_context.lifespan_context["client"]
+    tz: TimezoneService = ctx.request_context.lifespan_context["tz"]
+
+    # Use configured timezone as default
+    query_timezone = timezone or tz.timezone_name
 
     # Parse email list
     email_list = [e.strip() for e in emails.split(",")]
@@ -633,14 +662,14 @@ async def get_free_busy(
     if len(email_list) > 20:
         return json.dumps({"error": "Maximum 20 email addresses allowed"})
 
-    # Parse times
+    # Parse times using timezone service
     try:
-        parsed_start = datetime.fromisoformat(start_time)
+        parsed_start = tz.parse_datetime(start_time)
     except ValueError:
         return json.dumps({"error": f"Invalid start_time format: {start_time}. Use YYYY-MM-DDTHH:MM:SS."})
 
     try:
-        parsed_end = datetime.fromisoformat(end_time)
+        parsed_end = tz.parse_datetime(end_time)
     except ValueError:
         return json.dumps({"error": f"Invalid end_time format: {end_time}. Use YYYY-MM-DDTHH:MM:SS."})
 
@@ -649,16 +678,16 @@ async def get_free_busy(
             emails=email_list,
             start_time=parsed_start,
             end_time=parsed_end,
-            timezone=timezone,
+            timezone=query_timezone,
             interval_minutes=interval_minutes,
         )
 
         result = {
             "startTime": start_time,
             "endTime": end_time,
-            "timezone": timezone,
+            "timezone": query_timezone,
             "intervalMinutes": interval_minutes,
-            "schedules": [format_schedule(s) for s in schedules],
+            "schedules": [format_schedule(s, tz) for s in schedules],
         }
 
         return json.dumps(result, indent=2, default=str)

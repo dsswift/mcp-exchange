@@ -85,6 +85,7 @@ Required environment variables:
 | `EXCHANGE_TENANT_ID` | No | `common` | Azure AD tenant ID |
 | `EXCHANGE_TOKEN_CACHE` | No | `~/.mcp-exchange/token_cache.json` | Token cache location |
 | `EXCHANGE_TIMEOUT` | No | `30` | HTTP timeout in seconds |
+| `EXCHANGE_TIMEZONE` | No | `America/Chicago` | Timezone for date/time display (IANA format) |
 
 ## Usage
 
@@ -115,12 +116,14 @@ Waiting for authentication...
 claude mcp add exchange --scope user \
   -e EXCHANGE_CLIENT_ID=your-client-id \
   -e EXCHANGE_TENANT_ID=your-tenant-id \
+  -e EXCHANGE_TIMEZONE=America/Chicago \
   -- uvx --from git+https://github.com/dsswift/mcp-exchange.git mcp-exchange
 
 # Or with local installation
 claude mcp add exchange --scope user \
   -e EXCHANGE_CLIENT_ID=your-client-id \
   -e EXCHANGE_TENANT_ID=your-tenant-id \
+  -e EXCHANGE_TIMEZONE=America/Chicago \
   -- uv run --directory /path/to/mcp-exchange mcp-exchange
 ```
 
@@ -136,7 +139,8 @@ For other MCP clients, add to your configuration:
       "args": ["--from", "git+https://github.com/dsswift/mcp-exchange.git", "mcp-exchange"],
       "env": {
         "EXCHANGE_CLIENT_ID": "your-client-id",
-        "EXCHANGE_TENANT_ID": "your-tenant-id"
+        "EXCHANGE_TENANT_ID": "your-tenant-id",
+        "EXCHANGE_TIMEZONE": "America/Chicago"
       }
     }
   }

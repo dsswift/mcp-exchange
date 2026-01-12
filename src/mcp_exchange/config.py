@@ -18,6 +18,7 @@ class ExchangeConfig:
     tenant_id: str = "common"
     token_cache_path: Path = Path.home() / ".mcp-exchange" / "token_cache.json"
     timeout: int = 30
+    timezone: str = "America/Chicago"
 
     # Microsoft Graph API scopes for Exchange Online
     scopes: tuple[str, ...] = (
@@ -78,9 +79,13 @@ def load_config() -> ExchangeConfig:
         )
         timeout = 30
 
+    # Timezone (IANA format, e.g., "America/Chicago", "America/New_York")
+    timezone = os.getenv("EXCHANGE_TIMEZONE", "America/Chicago")
+
     return ExchangeConfig(
         client_id=client_id,
         tenant_id=tenant_id,
         token_cache_path=token_cache_path,
         timeout=timeout,
+        timezone=timezone,
     )
