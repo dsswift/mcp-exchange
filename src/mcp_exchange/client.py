@@ -452,7 +452,9 @@ class ExchangeClient:
             filters.append(f"start/dateTime ge '{start_date.isoformat()}'")
 
         if end_date:
-            filters.append(f"end/dateTime le '{end_date.isoformat()}'")
+            # Use end of day (23:59:59) to include events ending anytime on this date
+            end_of_day = end_date.replace(hour=23, minute=59, second=59)
+            filters.append(f"start/dateTime le '{end_of_day.isoformat()}'")
 
         if filters:
             params["$filter"] = " and ".join(filters)
